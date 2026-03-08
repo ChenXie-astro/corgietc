@@ -48,8 +48,16 @@ class corgietc(Nemati):
         pp_Factor_CBE (float)
             Post-processing factor (e.g., 30 for 30x speckle suppression). Only used if
             not set in scienceInstrument input specification definition. Defaults to 2.0
+        RefStar_SpectralType (str)
+            Spectral type of the reference star (eg a0v, b3v, a5v, f5v, g0v, g5v, k0v,
+            k5v, m0v, m5v)
+        RefStar_V_mag (float)
+            Visual Magnitude of the reference star
+        TimeonRefStar_tRef_per_tTar (float)
+            Time on a reference star per target
         contrast_degradation (float)
-            Multiplier for rawcontrast (e.g. 0.5 represents 50% rawcontrast). Defaults to 1.0
+            Multiplier for rawcontrast (e.g. 0.5 represents 50% rawcontrast). Defaults
+            to 1.0
         desiredRate (float)
             Target value for e-/pix/frame. Defaults to 0.1
         tfmin (float)
@@ -109,7 +117,10 @@ class corgietc(Nemati):
         tfmin=3,
         tfmax=100,
         frameThresh=0.5,
-        contrast_degradation = 1.0,
+        RefStar_SpectralType="a0v",
+        RefStar_V_mag=2.26,
+        TimeonRefStar_tRef_per_tTar=0.25,
+        contrast_degradation=1.0,
         forcePhotonCounting=False,
         **specs,
     ):
@@ -146,6 +157,9 @@ class corgietc(Nemati):
             "Rlam": Rlam,
             "Rconst": Rconst,
             "pp_Factor_CBE": pp_Factor_CBE,
+            "RefStar_SpectralType": RefStar_SpectralType,
+            "RefStar_V_mag": RefStar_V_mag,
+            "TimeonRefStar_tRef_per_tTar": TimeonRefStar_tRef_per_tTar,
             "contrast_degradation": contrast_degradation,
         }
 
@@ -240,7 +254,7 @@ class corgietc(Nemati):
 
         # specify dictionary of keys and units
         kws = {
-            "CritLam": u.nm,  # ciritcal wavelength
+            "CritLam": u.nm,  # critical wavelength
             "compbeamD": u.m,  # compressed beam diameter
             "fnlFocLen": u.m,  # final focal length
             "PSF_x_lamD": None,  # PSF x extent in lambda/D
@@ -282,6 +296,9 @@ class corgietc(Nemati):
             inst["DET_QE_Data"] = fl.loadCSVrow(
                 os.path.normpath(os.path.expandvars(inst["DET_QE_Data"]))
             )
+            inst["matrix"] = np.genfromtxt(
+                os.path.normpath(os.path.expandvars(inst["matrix"])), delimiter=","
+            )
 
     def populate_observingModes_extra(self):
         """Add specific observing mode keywords"""
@@ -289,6 +306,9 @@ class corgietc(Nemati):
         self.allowed_observingMode_kws.append("Scenario")
         self.allowed_observingMode_kws.append("StrayLight_Data")
         self.allowed_observingMode_kws.append("pp_Factor_CBE")
+        self.allowed_observingMode_kws.append("RefStar_SpectralType")
+        self.allowed_observingMode_kws.append("RefStar_V_mag")
+        self.allowed_observingMode_kws.append("TimeonRefStar_tRef_per_tTar")
         self.allowed_observingMode_kws.append("contrast_degradation")
 
         for nmode, mode in enumerate(self.observingModes):
@@ -358,9 +378,27 @@ class corgietc(Nemati):
             mode["pp_Factor_CBE"] = mode.get(
                 "pp_Factor_CBE", self.default_vals_extra2["pp_Factor_CBE"]
             )
-            #ensure contrast_degradation is in the mode
+
+            # ensure RefStar_SpectralType is in the mode
+            mode["RefStar_SpectralType"] = mode.get(
+                "RefStar_SpectralType", self.default_vals_extra2["RefStar_SpectralType"]
+            )
+
+            # ensure RefStar_V_mag is in the mode
+            mode["RefStar_V_mag"] = mode.get(
+                "RefStar_V_mag", self.default_vals_extra2["RefStar_V_mag"]
+            )
+
+            # ensure TimeonRefStar_tRef_per_tTar is in the mode
+            mode["TimeonRefStar_tRef_per_tTar"] = mode.get(
+                "TimeonRefStar_tRef_per_tTar",
+                self.default_vals_extra2["TimeonRefStar_tRef_per_tTar"],
+            )
+
+            # ensure contrast_degradation is in the mode
             mode["contrast_degradation"] = mode.get(
-                "contrast_degradation", self.default_vals_extra2["contrast_degradation"])
+                "contrast_degradation", self.default_vals_extra2["contrast_degradation"]
+            )
 
     def construct_cg(self, mode, WA):
         "Repackage values at a single WA into CGParameters object"
@@ -449,17 +487,18 @@ class corgietc(Nemati):
         sInds = np.array(sInds, ndmin=1, copy=copy_if_needed)
 
         # Star fluxes (ph/m^2/s)
-        flux_star = TL.starFlux(sInds, mode)
+        flux_star = TL.starFlux(sInds, mode).flatten()
 
         # check if stars identified have vmag 9 or greater, must be before the loop
-        vmag = TL.Vmag #create array of VMag
+        vmag = TL.Vmag  # create array of VMag
         vmag_greater_than_9 = vmag > 9
         names_greater_than_9 = TL.Name[vmag_greater_than_9]
 
-        if(np.any(vmag_greater_than_9)): #use np.any
+        if np.any(vmag_greater_than_9):
             warnings.warn(
-                f"Integration times for these targets may not be accurate: {names_greater_than_9}"
-                )
+                "Integration times for these targets may not be accurate: "
+                f"{names_greater_than_9}"
+            )
 
         # get mode elements
         syst = mode["syst"]
@@ -557,7 +596,11 @@ class corgietc(Nemati):
             )
 
             # get contrast stability values (all are ppb in the interpolants)
-            rawContrast = syst["AvgRawContrast"](mode["lam"], planetWA)[0] * 1e-9 * mode["contrast_degradation"]
+            rawContrast = (
+                syst["AvgRawContrast"](mode["lam"], planetWA)[0]
+                * 1e-9
+                * mode["contrast_degradation"]
+            )
             if "SystematicC" in syst:
                 SystematicCont = syst["SystematicC"](mode["lam"], planetWA)[0] * 1e-9
             else:
@@ -644,14 +687,12 @@ class corgietc(Nemati):
                 inst["DET_CBE_Data"], monthsAtL2, frameTime, mpix, True
             )
 
-            # TODO: change to JSON input or computed value or per-target calculation
-            TimeonRefStar_tRef_per_tTar = 0.25
             rdi_penalty = fl.rdi_noise_penalty(
                 mode["inBandFlux0_sum"],
                 starFlux,
-                TimeonRefStar_tRef_per_tTar,
-                "a0v",
-                2.26,
+                mode["TimeonRefStar_tRef_per_tTar"],
+                mode["RefStar_SpectralType"],
+                mode["RefStar_V_mag"],
             )
             k_sp = rdi_penalty["k_sp"]
             k_det = rdi_penalty["k_det"]
@@ -677,6 +718,17 @@ class corgietc(Nemati):
                 Acol,
             )
 
+            # check for pol mode
+            if ("polfraction" in mode) and not (np.isnan(mode["polfraction"])):
+                assert (
+                    0 <= mode["polfraction"] <= 1
+                ), "Polarization fraction must be in [0,1]"
+
+                # if we're doing a pol calculation, need to double detector noise rates
+                nvRatesCore.detDark *= 2
+                nvRatesCore.detCIC *= 2
+                nvRatesCore.detRead *= 2
+
             # populate outputs
             C_p[jj] = mode["f_SR"] * cphrate.planet * dQE
             C_b[jj] = nvRatesCore.total
@@ -700,6 +752,183 @@ class corgietc(Nemati):
             return C_p << self.inv_s, C_b << self.inv_s, C_sp << self.inv_s, extra
 
         return C_p << self.inv_s, C_b << self.inv_s, C_sp << self.inv_s
+
+    def calc_polfrac(self, p_in, _C_p, mode):
+        """
+        Compute measured polarization fraction p_f for a given intrinsic
+        polarization fraction p_in.
+        """
+        theta = mode["theta"]
+
+        Pol0 = _C_p * 96.2
+        Pol45 = _C_p * 96.5
+
+        I0 = Pol0 / 2 * (1 + p_in * np.cos(2 * theta))
+        I90 = Pol0 / 2 * (1 - p_in * np.cos(2 * theta))
+        I45 = Pol45 / 2 * (1 + p_in * np.sin(2 * theta))
+        I135 = Pol45 / 2 * (1 - p_in * np.sin(2 * theta))
+
+        I_in = (I0 + I90 + I45 + I135) / 2
+        Q_in = I0 - I90
+        U_in = I45 - I135
+
+        mat = np.array([I_in, Q_in, U_in, [0.0]])
+
+        # Instrument Mueller matrix
+        in_mat = mode["inst"]["matrix"] @ mat
+
+        I_m = in_mat[0]
+        Q_m = -in_mat[1]
+        U_m = in_mat[2]
+
+        # Measured polarization fraction
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p_f = np.sqrt(Q_m**2 + U_m**2) / I_m
+
+        return p_f
+
+    def calc_intTime(self, TL, sInds, fZ, JEZ, dMag, WA, mode, TK=None):
+        """Finds integration times of target systems for a specific observing
+        mode (imaging or characterization), based on Nemati 2014 (SPIE).
+
+        Args:
+            TL (TargetList module):
+                TargetList class object
+            sInds (integer ndarray):
+                Integer indices of the stars of interest
+            fZ (astropy Quantity array):
+                Surface brightness of local zodiacal light in units of 1/arcsec2
+            JEZ (astropy Quantity array):
+                Intensity of exo-zodiacal light in units of ph/s/m2/arcsec2
+            dMag (float ndarray):
+                Differences in magnitude between planets and their host star
+            WA (astropy Quantity array):
+                Working angles of the planets of interest in units of arcsec
+            mode (dict):
+                Selected observing mode
+            TK (TimeKeeping object):
+                Optional TimeKeeping object (default None), used to model detector
+                degradation effects where applicable.
+
+        Returns:
+            intTime (astropy Quantity array):
+                Integration times in units of day
+
+        """
+
+        # electron counts
+        C_p, C_b, C_sp = self.Cp_Cb_Csp(TL, sInds, fZ, JEZ, dMag, WA, mode, TK=TK)
+        _C_p = C_p.to_value(self.inv_s)
+        _C_b = C_b.to_value(self.inv_s)
+        _C_sp = C_sp.to_value(self.inv_s)
+
+        # get SNR threshold
+        SNR = mode["SNR"]
+        # calculate integration time based on Nemati 2014
+        # if doing a pol calculation, include polarization fraction
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if ("polfraction" in mode) and not np.isnan(mode["polfraction"]):
+                if ("theta" not in mode) or np.isnan(mode["theta"]):
+                    mode["theta"] = 0
+
+                p_in = mode["polfraction"]
+                p_f = self.calc_polfrac(p_in, _C_p, mode)
+                # theta_f = 0.5*(np.arctan(U_m/Q_m)*180/np.pi)
+
+                if ("Cp_ab" not in mode) or np.isnan(mode["Cp_ab"]):
+                    mode["Cp_ab"] = 0
+
+                intTime = (
+                    np.true_divide(
+                        SNR**2.0 * _C_b,
+                        (
+                            (_C_p * p_f) ** 2.0
+                            - (SNR**2 * (_C_sp**2 + mode["Cp_ab"] ** 2))
+                        ),
+                    )
+                    * self.s2d
+                )
+            else:
+                intTime = (
+                    np.true_divide(SNR**2.0 * _C_b, (_C_p**2.0 - (SNR * _C_sp) ** 2.0))
+                    * self.s2d
+                )
+        # infinite and NAN are set to zero
+        intTime[np.isinf(intTime) | np.isnan(intTime)] = np.nan
+        # negative values are set to zero
+        intTime[intTime < 0.0] = np.nan
+
+        return intTime << u.d
+
+    def calc_critical_polfraction(self, TL, sInds, fZ, JEZ, dMag, WA, mode, TK=None):
+        """
+        Returns the critical measured polarization fraction p_in,crit such that
+        integration time transitions from undefined to finite.
+        """
+
+        # electron counts
+        C_p, C_b, C_sp = self.Cp_Cb_Csp(TL, sInds, fZ, JEZ, dMag, WA, mode, TK=TK)
+        _C_p = C_p.to_value(self.inv_s)
+        _C_b = C_b.to_value(self.inv_s)
+        _C_sp = C_sp.to_value(self.inv_s)
+
+        # get SNR threshold
+        SNR = mode["SNR"]
+        theta = mode["theta"]
+
+        if ("Cp_ab" not in mode) or np.isnan(mode["Cp_ab"]):
+            mode["Cp_ab"] = 0
+
+        # Critical polarization fraction
+        p_f_crit = SNR * np.sqrt(_C_sp**2 + mode["Cp_ab"] ** 2) / _C_p
+
+        # Anything >1 is physically impossible
+        if np.any((p_f_crit <= 0) | (p_f_crit >= 1)):
+            return np.nan
+
+        def f_root(p_in):
+            return float(self.calc_polfrac(p_in, _C_p, mode)[0] - p_f_crit[0])
+
+        if f_root(0) >= 0:
+            return 0
+
+        if f_root(1) < 0:
+            return np.nan
+
+        try:
+            sol = root_scalar(
+                f_root,
+                bracket=[0.0, 1.0],
+                method="brentq",
+            )
+            return sol.root
+
+        except Exception:
+            return np.nan
+
+    def int_time_denom_obj(self, dMag, *args):
+        """
+        Objective function for calc_dMag_per_intTime's calculation of the root
+        of the denominator of calc_inTime to determine the upper bound to use
+        for minimizing to find the correct dMag. Only necessary for coronagraphs.
+
+        Args:
+            dMag (~numpy.ndarray(float)):
+                dMag being tested
+            *args:
+                all the other arguments that calc_intTime needs
+
+        Returns:
+            ~astropy.units.Quantity(~numpy.ndarray(float)):
+                Denominator of integration time expression
+        """
+        TL, sInds, fZ, JEZ, WA, mode, TK = args
+        C_p, C_b, C_sp = self.Cp_Cb_Csp(TL, sInds, fZ, JEZ, dMag, WA, mode, TK=TK)
+        denom = (
+            C_p.to_value(self.inv_s) ** 2
+            - (mode["SNR"] * C_sp.to_value(self.inv_s)) ** 2
+        )
+        return denom[0]
 
     def calc_dMag_per_intTime(
         self,
